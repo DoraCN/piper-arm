@@ -53,10 +53,11 @@ sleep 1
 
 echo "==> 1/6 写入 udev 规则: $UDEV_RULES"
 # 用 ATTR{type}=="280" (ARPHRD_CAN) + KERNELS(USB 端口) 匹配，比 DRIVERS 更可靠
+# RUN+= 在重插 USB 时自动执行拉起脚本, 避免接口处于 DOWN 状态
 cat > "$UDEV_RULES" <<EOF
-# Piper 双臂 CAN 固定命名 (由 setup_can_dual_arm.sh 生成)
-SUBSYSTEM=="net", ACTION=="add", ATTR{type}=="280", KERNELS=="${LEFT_USB}",  NAME="${LEFT_IFACE}"
-SUBSYSTEM=="net", ACTION=="add", ATTR{type}=="280", KERNELS=="${RIGHT_USB}", NAME="${RIGHT_IFACE}"
+# Piper 双臂 CAN 固定命名 + 自动拉起 (由 setup_can_dual_arm.sh 生成)
+SUBSYSTEM=="net", ACTION=="add", ATTR{type}=="280", KERNELS=="${LEFT_USB}",  NAME="${LEFT_IFACE}",  RUN+="/usr/local/bin/piper-can-bringup.sh"
+SUBSYSTEM=="net", ACTION=="add", ATTR{type}=="280", KERNELS=="${RIGHT_USB}", NAME="${RIGHT_IFACE}", RUN+="/usr/local/bin/piper-can-bringup.sh"
 EOF
 
 echo "==> 2/6 重新加载 udev 规则"

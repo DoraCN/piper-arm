@@ -178,6 +178,14 @@ sudo bash scripts/setup_can_dual_arm.sh
 > `can_left`/`can_right`。若为旧版脚本，直接重跑
 > `sudo bash scripts/setup_can_dual_arm.sh` 即可补齐开机自动加载。
 
+> **注意：机械臂上电后需要约 30~60 秒完成启动**，启动完成前 CAN 收发器不在
+> 总线上——此时收不到任何反馈、发送会报 ENOBUFS/bus-off，属正常现象，不是
+> 硬件故障。请**先等待臂启动完成**再运行程序。
+
+> **重插 USB-CAN 转接器后**接口会重建且默认 DOWN（`cansend` 报 "Network is
+> down"）。新版配置脚本已通过 udev `RUN+=` 在重插时自动拉起；老版本请手动
+> `sudo ip link set can_left up type can bitrate 1000000`。
+
 如需手动配置，等价内容如下。
 
 ### 7.1 udev 规则固定名字
