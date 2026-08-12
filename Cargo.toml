@@ -1,0 +1,13 @@
+[package]
+name = "piper-arm"
+version = "0.1.0"
+edition = "2024"
+description = "A safe Rust driver for the AgileX / Songling Piper robotic arm (V2 CAN protocol)"
+license = "MIT"
+
+[dependencies]
+socketcan = "3.6"
+log = "0.4"
+
+[dev-dependencies]
+env_logger = "0.11"
