@@ -33,14 +33,10 @@ fn sleep(ms: u64) {
 fn print_status(arm: &PiperInterface) {
     let s = arm.get_arm_status();
     let enable = arm.get_arm_enable_status();
-    let live = s.time_stamp > 0.0;
     println!(
-        "  [status] ts={:.1}s{} ctrl_mode={:?} teach={:?} arm_status={:?} mode_feed={:?} \
-         err=0x{:04X} enabled=[{}]",
-        s.time_stamp,
-        if live { "" } else { " (无数据!未收到机械臂反馈)" },
+        "  [status] ctrl_mode={:?} arm_status={:?} mode_feed={:?} err=0x{:04X} \
+         enabled=[{}]",
         s.msg.ctrl_mode,
-        s.msg.teach_status,
         s.msg.arm_status,
         s.msg.mode_feed,
         s.msg.err_code,
@@ -52,84 +48,39 @@ fn print_status(arm: &PiperInterface) {
     );
 }
 
-/// 退出非 CAN 指令模式，返回是否成功进入可控制状态。
-/// 示教模式先尝试不失电的 exit_teaching，无效则 reset（会失电）并重试。
-fn enter_can_mode(arm: &PiperInterface) -> bool {
-    let mut s = arm.get_arm_status();
-    if s.msg.ctrl_mode == CtrlMode::CanCtrl {
-        return true;
-    }
-
-    if s.msg.ctrl_mode == CtrlMode::TeachingMode {
-        println!("示教模式：尝试『使能保持位姿 + 结束示教』不失电切换...");
-        if arm.enable_arm(7, 0x02).is_ok() {
-            std::thread::sleep(Duration::from_millis(400));
-        }
-        if arm.exit_teaching().is_ok() {
-            std::thread::sleep(Duration::from_millis(800));
-        }
-        print_status(arm);
-        s = arm.get_arm_status();
-        if s.msg.ctrl_mode != CtrlMode::TeachingMode {
-            return true;
-        }
-        println!("  结束示教未生效，改用 reset 退出（会失电）");
-    } else {
-        println!("机械臂未处于 CAN 指令模式，发送复位指令退出...");
-    }
-
-    // reset 重试并校验是否真的退出（若仍 TeachingMode，说明命令被忽略）
-    for attempt in 1..=3 {
-        println!("  reset 第 {attempt} 次...");
-        if arm.reset_piper().is_ok() {
-            std::thread::sleep(Duration::from_millis(1500));
-        }
-        print_status(arm);
-        s = arm.get_arm_status();
-        if s.msg.ctrl_mode != CtrlMode::TeachingMode {
-            return true;
-        }
-    }
-
-    println!(
-        "[ERROR] 连续 reset 后机械臂仍在示教模式，控制指令被忽略。\n\
-         \t请检查机械臂上的示教开关/按钮是否按下（物理锁存），\n\
-         \t或使用上位机/断电重启退出示教模式后重试。"
-    );
-    false
-}
-
 fn main() -> piper_arm::Result<()> {
     let can_name = std::env::args().nth(1).unwrap_or_else(|| "can0".into());
     println!("打开 CAN 接口: {can_name}");
     let arm = PiperInterface::open_socketcan(&can_name).expect("open socketcan");
     sleep(300);
 
-    // 0a. 等待第一帧反馈：收不到说明机械臂未上电/不在该 CAN 总线上
-    println!("等待机械臂反馈...");
-    let t0 = Instant::now();
-    loop {
-        if arm.get_arm_status().time_stamp > 0.0 {
-            println!("  已收到机械臂反馈");
-            break;
-        }
-        if t0.elapsed() > Duration::from_secs(5) {
-            println!(
-                "[ERROR] 5 秒内未收到任何机械臂反馈。\n\
-                 \t请确认:\n\
-                 \t  1. 机械臂已上电并完成启动\n\
-                 \t  2. 机械臂 CAN 线接在 {can_name} 对应的 USB-CAN 转接器上\n\
-                 \t  3. 可先用 candump {can_name} -T 3000 验证能否收到 0x2A1 等帧"
-            );
-            return Ok(());
-        }
-        sleep(100);
-    }
+    println!("当前机械臂状态:");
     print_status(&arm);
 
-    // 0. 退出非 CAN 指令模式（示教模式优先不失电切换，失败则 reset 重试）
-    if !enter_can_mode(&arm) {
-        return Ok(());
+    // 0. 退出非 CAN 指令模式
+    //    示教模式: 先尝试『使能保持位姿 + 结束示教(0x150 grag_teach_ctrl=0x02)』不失电切换;
+    //    固件不接受则回退 reset（会失电）。其它非 CanCtrl 模式直接 reset。
+    let s = arm.get_arm_status();
+    if s.msg.ctrl_mode != CtrlMode::CanCtrl {
+        if s.msg.ctrl_mode == CtrlMode::TeachingMode {
+            println!("示教模式：尝试『使能保持位姿 + 结束示教』不失电切换...");
+            arm.enable_arm(7, 0x02)?;
+            sleep(400);
+            arm.exit_teaching()?;
+            sleep(800);
+            print_status(&arm);
+            if arm.get_arm_status().msg.ctrl_mode == CtrlMode::TeachingMode {
+                println!("  结束示教未生效，改用 reset 退出（会失电）");
+                arm.reset_piper()?;
+                sleep(1200);
+                print_status(&arm);
+            }
+        } else {
+            println!("机械臂未处于 CAN 指令模式，发送复位指令退出...");
+            arm.reset_piper()?;
+            sleep(1200);
+            print_status(&arm);
+        }
     }
 
     // 1. 先设置 CAN 指令 + 关节控制模式（官方文档顺序：reset -> 设模式 -> 使能）
