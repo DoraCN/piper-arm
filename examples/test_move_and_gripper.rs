@@ -57,7 +57,66 @@ fn main() -> piper_arm::Result<()> {
     println!("当前机械臂状态:");
     print_status(&arm);
 
-    // 0a. 查询并打印本机机械臂真实关节限位（0.1° 单位）
+    // 0. 退出非 CAN 指令模式
+    //    示教模式: 先尝试『使能保持位姿 + 结束示教(0x150 grag_teach_ctrl=0x02)』不失电切换;
+    //    固件不接受则回退 reset（会失电）。其它非 CanCtrl 模式直接 reset。
+    let s = arm.get_arm_status();
+    if s.msg.ctrl_mode != CtrlMode::CanCtrl {
+        if s.msg.ctrl_mode == CtrlMode::TeachingMode {
+            println!("示教模式：尝试『使能保持位姿 + 结束示教』不失电切换...");
+            arm.enable_arm(7, 0x02)?;
+            sleep(400);
+            arm.exit_teaching()?;
+            sleep(800);
+            print_status(&arm);
+            if arm.get_arm_status().msg.ctrl_mode == CtrlMode::TeachingMode {
+                println!("  结束示教未生效，改用 reset 退出（会失电）");
+                arm.reset_piper()?;
+                sleep(1200);
+                print_status(&arm);
+            }
+        } else {
+            println!("机械臂未处于 CAN 指令模式，发送复位指令退出...");
+            arm.reset_piper()?;
+            sleep(1200);
+            print_status(&arm);
+        }
+    }
+
+    // 1. 先设置 CAN 指令 + 关节控制模式（官方文档顺序：reset -> 设模式 -> 使能）
+    println!("设置关节控制模式 (0x151)...");
+    arm.mode_ctrl(0x01, 0x01, 30, 0x00)?;
+    sleep(500);
+
+    // 2. 使能电机：持续发送直到反馈确认全部使能（超时 10s）
+    println!("使能机械臂电机...");
+    let t0 = Instant::now();
+    loop {
+        arm.enable_arm(7, 0x02)?;
+        sleep(200);
+        let enabled = arm.get_arm_enable_status();
+        if enabled.iter().all(|&e| e) {
+            println!("  电机已使能: {:?}", enabled);
+            break;
+        }
+        if t0.elapsed() > ENABLE_TIMEOUT {
+            println!("[WARN] 使能超时，当前状态:");
+            print_status(&arm);
+            break;
+        }
+    }
+    sleep(300);
+
+    // 3. 再次下发模式并校验（使能后可能需要重发一次 0x151）
+    arm.mode_ctrl(0x01, 0x01, 30, 0x00)?;
+    sleep(500);
+    print_status(&arm);
+    if arm.get_arm_status().msg.ctrl_mode != CtrlMode::CanCtrl {
+        println!("[WARN] ctrl_mode 未切换为 CAN 指令模式，指令可能不被执行");
+    }
+
+    // 4a. 查询并打印本机机械臂真实关节限位（0.1° 单位）。
+    //     注意：示教模式下机械臂不响应 0x472 查询，务必在 CAN 模式下查。
     println!("查询关节限位...");
     arm.search_all_motor_max_angle_spd()?;
     sleep(800);
@@ -73,100 +132,45 @@ fn main() -> piper_arm::Result<()> {
         );
     }
 
-    // 0b. 把目标钳制到本机限位内（0x7FFF 表示该值无效，跳过）
-    //    注意：0x473 限位单位是 0.1°，转 0.001° 需要 ×100
+    // 4b. 把目标钳制到本机限位内。
+    //     0x7FFF 或 0/0 表示限位无效/未返回，跳过该关节的钳制。
     let mut target = JOINT_TARGET;
     let mut clamped = false;
     for i in 0..6 {
         let l = limits[i + 1];
-        if l.max_angle_limit != 0x7FFF && l.min_angle_limit != 0x7FFF {
-            let lo = l.min_angle_limit as i32 * 100; // 0.1° -> 0.001°
-            let hi = l.max_angle_limit as i32 * 100;
-            if target[i] < lo || target[i] > hi {
-                println!(
-                    "  [clamp] joint{} 目标 {:.3}° 超出限位 [{:.1}°, {:.1}°]，钳制为 {:.3}°",
-                    i + 1,
-                    target[i] as f64 / 1000.0,
-                    lo as f64 / 1000.0,
-                    hi as f64 / 1000.0,
-                    target[i].clamp(lo, hi) as f64 / 1000.0,
-                );
-                target[i] = target[i].clamp(lo, hi);
-                clamped = true;
-            }
+        if l.max_angle_limit == 0x7FFF
+            || l.min_angle_limit == 0x7FFF
+            || (l.max_angle_limit == 0 && l.min_angle_limit == 0)
+        {
+            continue;
+        }
+        let lo = l.min_angle_limit as i32 * 100; // 0.1° -> 0.001°
+        let hi = l.max_angle_limit as i32 * 100;
+        if target[i] < lo || target[i] > hi {
+            println!(
+                "  [clamp] joint{} 目标 {:.3}° 超出限位 [{:.1}°, {:.1}°]，钳制为 {:.3}°",
+                i + 1,
+                target[i] as f64 / 1000.0,
+                lo as f64 / 1000.0,
+                hi as f64 / 1000.0,
+                target[i].clamp(lo, hi) as f64 / 1000.0,
+            );
+            target[i] = target[i].clamp(lo, hi);
+            clamped = true;
         }
     }
     if clamped {
         println!("  钳制后目标: {:?}", target);
     }
 
-    // 0. 若机械臂处于示教模式 (TeachingMode)，尝试不失能地直接切控制模式：
-    //    先使能电机（保持位姿）→ 结束示教 (0x150 grag_teach_ctrl=0x02)。
-    //    若固件在结束示教时仍会失电，会退化为 reset + 重新使能流程。
-    let s = arm.get_arm_status();
-    let in_can_mode = s.msg.ctrl_mode == CtrlMode::CanCtrl;
-    if !in_can_mode {
-        if s.msg.ctrl_mode == CtrlMode::TeachingMode {
-            println!("示教模式：尝试『使能保持位姿 + 结束示教』直接切控制模式（不失电）...");
-            arm.enable_arm(7, 0x02)?;
-            sleep(400);
-            arm.exit_teaching()?;
-            sleep(800);
-            print_status(&arm);
-            if arm.get_arm_status().msg.ctrl_mode == CtrlMode::TeachingMode {
-                println!("  结束示教未生效，改用 reset 退出（会失电）");
-                arm.reset_piper()?;
-                sleep(1000);
-                print_status(&arm);
-                sleep(500);
-            }
-        } else {
-            println!("机械臂未处于 CAN 指令模式，发送复位指令退出...");
-            arm.reset_piper()?;
-            sleep(1000);
-            print_status(&arm);
-            // 复位后电机失电，等待状态稳定
-            sleep(500);
-        }
-    }
-
-    // 1. 使能电机：持续发送直到反馈确认全部使能（超时 10s）
-    println!("使能机械臂电机...");
-    let t0 = Instant::now();
-    loop {
-        arm.enable_arm(7, 0x02)?;
-        sleep(200);
-        let enabled = arm.get_arm_enable_status();
-        if enabled.iter().all(|&e| e) {
-            println!("  电机已使能: {:?}", enabled);
-            break;
-        }
-        if t0.elapsed() > ENABLE_TIMEOUT {
-            println!("[WARN] 使能超时，当前状态:");
-            print_status(&arm);
-            println!("  继续执行，观察模式校验结果...");
-            break;
-        }
-    }
-    sleep(300);
-
-    // 2. 切换为 CAN 指令 + 关节控制模式，并校验 ctrl_mode / mode_feed
-    println!("设置关节控制模式 (0x151)...");
-    arm.mode_ctrl(0x01, 0x01, 30, 0x00)?;
-    sleep(500);
-    print_status(&arm);
-    if arm.get_arm_status().msg.ctrl_mode != CtrlMode::CanCtrl {
-        println!("[WARN] ctrl_mode 仍未切换为 CAN 指令模式，指令可能不被执行");
-    }
-
-    // 3. 使能夹爪（先 0x02 清错误，再 0x01 使能）
+    // 5. 使能夹爪（先 0x02 清错误，再 0x01 使能）
     println!("使能夹爪...");
     arm.gripper_ctrl(0, GRIPPER_EFFORT, 0x02, 0)?;
     sleep(200);
     arm.gripper_ctrl(0, GRIPPER_EFFORT, 0x01, 0)?;
     sleep(300);
 
-    // 4. 移动到目标关节位姿，轮询反馈直到到位或超时
+    // 6. 移动到目标关节位姿，轮询反馈直到到位或超时
     println!(
         "移动至关节位姿: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, {:.3}] deg",
         target[0] as f64 / 1000.0,
