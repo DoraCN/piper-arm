@@ -74,13 +74,14 @@ fn main() -> piper_arm::Result<()> {
     }
 
     // 0b. 把目标钳制到本机限位内（0x7FFF 表示该值无效，跳过）
+    //    注意：0x473 限位单位是 0.1°，转 0.001° 需要 ×100
     let mut target = JOINT_TARGET;
     let mut clamped = false;
     for i in 0..6 {
         let l = limits[i + 1];
         if l.max_angle_limit != 0x7FFF && l.min_angle_limit != 0x7FFF {
-            let lo = l.min_angle_limit as i32 * 10; // 0.1° -> 0.001°
-            let hi = l.max_angle_limit as i32 * 10;
+            let lo = l.min_angle_limit as i32 * 100; // 0.1° -> 0.001°
+            let hi = l.max_angle_limit as i32 * 100;
             if target[i] < lo || target[i] > hi {
                 println!(
                     "  [clamp] joint{} 目标 {:.3}° 超出限位 [{:.1}°, {:.1}°]，钳制为 {:.3}°",
