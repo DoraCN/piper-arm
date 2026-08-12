@@ -89,8 +89,9 @@ rename_iface() {
 rename_iface "\$LEFT_USB"  "${LEFT_IFACE}"
 rename_iface "\$RIGHT_USB" "${RIGHT_IFACE}"
 
-ip link set "${LEFT_IFACE}"  up type can bitrate "\$BITRATE"
-ip link set "${RIGHT_IFACE}" up type can bitrate "\$BITRATE"
+# restart-ms: bus-off 时自动恢复, 避免接口离线后发送报 ENOBUFS
+ip link set "${LEFT_IFACE}"  up type can bitrate "\$BITRATE" restart-ms 100
+ip link set "${RIGHT_IFACE}" up type can bitrate "\$BITRATE" restart-ms 100
 echo "can bringup done"
 EOF
 chmod +x /usr/local/bin/piper-can-bringup.sh
