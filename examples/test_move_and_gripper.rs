@@ -33,9 +33,12 @@ fn sleep(ms: u64) {
 fn print_status(arm: &PiperInterface) {
     let s = arm.get_arm_status();
     let enable = arm.get_arm_enable_status();
+    let live = s.time_stamp > 0.0;
     println!(
-        "  [status] ctrl_mode={:?} teach={:?} arm_status={:?} mode_feed={:?} err=0x{:04X} \
-         enabled=[{}]",
+        "  [status] ts={:.1}s{} ctrl_mode={:?} teach={:?} arm_status={:?} mode_feed={:?} \
+         err=0x{:04X} enabled=[{}]",
+        s.time_stamp,
+        if live { "" } else { " (无数据!未收到机械臂反馈)" },
         s.msg.ctrl_mode,
         s.msg.teach_status,
         s.msg.arm_status,
@@ -102,7 +105,26 @@ fn main() -> piper_arm::Result<()> {
     let arm = PiperInterface::open_socketcan(&can_name).expect("open socketcan");
     sleep(300);
 
-    println!("当前机械臂状态:");
+    // 0a. 等待第一帧反馈：收不到说明机械臂未上电/不在该 CAN 总线上
+    println!("等待机械臂反馈...");
+    let t0 = Instant::now();
+    loop {
+        if arm.get_arm_status().time_stamp > 0.0 {
+            println!("  已收到机械臂反馈");
+            break;
+        }
+        if t0.elapsed() > Duration::from_secs(5) {
+            println!(
+                "[ERROR] 5 秒内未收到任何机械臂反馈。\n\
+                 \t请确认:\n\
+                 \t  1. 机械臂已上电并完成启动\n\
+                 \t  2. 机械臂 CAN 线接在 {can_name} 对应的 USB-CAN 转接器上\n\
+                 \t  3. 可先用 candump {can_name} -T 3000 验证能否收到 0x2A1 等帧"
+            );
+            return Ok(());
+        }
+        sleep(100);
+    }
     print_status(&arm);
 
     // 0. 退出非 CAN 指令模式（示教模式优先不失电切换，失败则 reset 重试）
