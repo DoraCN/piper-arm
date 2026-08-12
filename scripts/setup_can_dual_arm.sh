@@ -39,18 +39,30 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-echo "==> 1/5 写入 udev 规则: $UDEV_RULES"
+echo "==> 0/6 确保 gs_usb 内核模块开机自动加载"
+# 模块已在 /lib/modules/$(uname -r)/extra/ 且 depmod -a 过，
+# 配置开机自动加载，并立即加载一次
+cat > /etc/modules-load.d/gs_usb.conf <<EOF
+# Piper 双臂 USB-CAN (gs_usb) 开机自动加载
+gs_usb
+EOF
+modprobe can 2>/dev/null || true
+modprobe can-dev 2>/dev/null || true
+modprobe gs_usb 2>/dev/null || echo "  [WARN] gs_usb 加载失败，请确认已按 docs/installation.md 编译安装 gs_usb.ko"
+sleep 1
+
+echo "==> 1/6 写入 udev 规则: $UDEV_RULES"
 cat > "$UDEV_RULES" <<EOF
 # Piper 双臂 CAN 固定命名 (由 setup_can_dual_arm.sh 生成)
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="${LEFT_USB}",  NAME="${LEFT_IFACE}"
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="${RIGHT_USB}", NAME="${RIGHT_IFACE}"
 EOF
 
-echo "==> 2/5 重新加载 udev 规则"
+echo "==> 2/6 重新加载 udev 规则"
 udevadm control --reload-rules
 udevadm trigger
 
-echo "==> 3/5 立即重命名当前接口 (按 USB 地址匹配)"
+echo "==> 3/6 立即重命名当前接口 (按 USB 地址匹配)"
 rename_iface() {
     local target_usb="$1" new_name="$2" cur_usb cur_iface
     for cur_iface in $(ip -br link show type can | awk '{print $1}'); do
@@ -67,7 +79,7 @@ rename_iface() {
 rename_iface "$LEFT_USB"  "$LEFT_IFACE"
 rename_iface "$RIGHT_USB" "$RIGHT_IFACE"
 
-echo "==> 4/5 写入 systemd 服务: $SYSTEMD_SERVICE"
+echo "==> 4/6 写入 systemd 服务: $SYSTEMD_SERVICE"
 cat > "$SYSTEMD_SERVICE" <<EOF
 [Unit]
 Description=Bring up Piper dual-arm CAN interfaces
@@ -85,7 +97,7 @@ ExecStart=/sbin/ip link set ${RIGHT_IFACE} up type can bitrate ${BITRATE}
 WantedBy=multi-user.target
 EOF
 
-echo "==> 5/5 启用并启动服务"
+echo "==> 5/6 启用并启动服务"
 systemctl daemon-reload
 systemctl enable can-bringup.service
 systemctl restart can-bringup.service

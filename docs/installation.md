@@ -168,9 +168,15 @@ sudo bash scripts/setup_can_dual_arm.sh
 ```
 
 脚本会：
-1. 写入 udev 规则，按 USB 硬件地址把接口固定命名为 `can_left`/`can_right`；
-2. 立即重命名当前已加载的接口（若未生效，重新插拔转接器）；
-3. 写入并启用 `can-bringup.service`，开机自动把两接口设为 UP、1 Mbps。
+1. 确保 `gs_usb` 内核模块**开机自动加载**（`/etc/modules-load.d/gs_usb.conf`）并立即加载；
+2. 写入 udev 规则，按 USB 硬件地址把接口固定命名为 `can_left`/`can_right`；
+3. 立即重命名当前已加载的接口（若未生效，重新插拔转接器）；
+4. 写入并启用 `can-bringup.service`，开机自动把两接口设为 UP、1 Mbps。
+
+> **重启后 `can_left` 不存在**的排查：先 `lsmod | grep gs_usb`，若未加载执行
+> `sudo modprobe gs_usb`；之后 `ip -br link show type can` 应出现
+> `can_left`/`can_right`。若为旧版脚本，直接重跑
+> `sudo bash scripts/setup_can_dual_arm.sh` 即可补齐开机自动加载。
 
 如需手动配置，等价内容如下。
 
