@@ -201,30 +201,47 @@ fn main() -> piper_arm::Result<()> {
         return Ok(());
     }
 
-    // 5. 夹爪张开/关闭 5 次
+    // 5. 夹爪张开/关闭 5 次：每次张开后先读反馈，再关闭后读反馈
     for i in 1..=GRIPPER_CYCLES {
-        println!("[{}] 张开夹爪 -> 60 mm", i);
+        println!("[{}] 张开夹爪 -> {} mm", i, GRIPPER_OPEN_MM as f64 / 1000.0);
         arm.gripper_ctrl(GRIPPER_OPEN_MM, GRIPPER_EFFORT, 0x01, 0)?;
-        sleep(1500);
+        let open_mm = wait_gripper(&arm, GRIPPER_OPEN_MM, Duration::from_secs(3));
+        println!("      张开到位反馈: {:.3} mm", open_mm);
 
-        println!("[{}] 关闭夹爪 -> 0 mm", i);
+        println!("[{}] 关闭夹爪 -> {} mm", i, GRIPPER_CLOSE_MM as f64 / 1000.0);
         arm.gripper_ctrl(GRIPPER_CLOSE_MM, GRIPPER_EFFORT, 0x01, 0)?;
-        sleep(1500);
+        let close_mm = wait_gripper(&arm, GRIPPER_CLOSE_MM, Duration::from_secs(3));
+        println!("      关闭到位反馈: {:.3} mm", close_mm);
 
         let joint = arm.get_arm_joint_msgs();
-        let gripper = arm.get_arm_gripper_msgs();
         println!(
-            "    关节: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, {:.3}] deg | 夹爪: {:.3} mm",
+            "      关节: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, {:.3}] deg",
             joint.msg.joint_1 as f64 / 1000.0,
             joint.msg.joint_2 as f64 / 1000.0,
             joint.msg.joint_3 as f64 / 1000.0,
             joint.msg.joint_4 as f64 / 1000.0,
             joint.msg.joint_5 as f64 / 1000.0,
             joint.msg.joint_6 as f64 / 1000.0,
-            gripper.msg.grippers_angle as f64 / 1000.0,
         );
     }
 
     println!("测试完成");
     Ok(())
+}
+
+/// 持续下发夹爪目标并轮询反馈，直到夹爪到位或超时；返回最后读取的行程（mm）。
+fn wait_gripper(arm: &PiperInterface, target_0_001mm: i32, timeout: Duration) -> f64 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let g = arm.get_arm_gripper_msgs().msg;
+        let last = g.grippers_angle as f64 / 1000.0;
+        if (g.grippers_angle - target_0_001mm).abs() <= 1_000 {
+            return last; // 到位（1mm 容差）
+        }
+        if Instant::now() > deadline {
+            println!("      [WARN] 夹爪未到位，当前反馈 {:.3} mm", last);
+            return last;
+        }
+        sleep(20);
+    }
 }
