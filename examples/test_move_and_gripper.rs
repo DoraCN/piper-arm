@@ -100,16 +100,34 @@ fn main() -> piper_arm::Result<()> {
         println!("  钳制后目标: {:?}", target);
     }
 
-    // 0. 若机械臂处于示教模式 (TeachingMode) 等非 CAN 指令模式，先复位退出
-    //    reset 会使机械臂立刻失电，请确保周围无遮挡/人。
-    let in_can_mode = arm.get_arm_status().msg.ctrl_mode == CtrlMode::CanCtrl;
+    // 0. 若机械臂处于示教模式 (TeachingMode)，尝试不失能地直接切控制模式：
+    //    先使能电机（保持位姿）→ 结束示教 (0x150 grag_teach_ctrl=0x02)。
+    //    若固件在结束示教时仍会失电，会退化为 reset + 重新使能流程。
+    let s = arm.get_arm_status();
+    let in_can_mode = s.msg.ctrl_mode == CtrlMode::CanCtrl;
     if !in_can_mode {
-        println!("机械臂未处于 CAN 指令模式，发送复位指令退出...");
-        arm.reset_piper()?;
-        sleep(1000);
-        print_status(&arm);
-        // 复位后电机失电，等待状态稳定
-        sleep(500);
+        if s.msg.ctrl_mode == CtrlMode::TeachingMode {
+            println!("示教模式：尝试『使能保持位姿 + 结束示教』直接切控制模式（不失电）...");
+            arm.enable_arm(7, 0x02)?;
+            sleep(400);
+            arm.exit_teaching()?;
+            sleep(800);
+            print_status(&arm);
+            if arm.get_arm_status().msg.ctrl_mode == CtrlMode::TeachingMode {
+                println!("  结束示教未生效，改用 reset 退出（会失电）");
+                arm.reset_piper()?;
+                sleep(1000);
+                print_status(&arm);
+                sleep(500);
+            }
+        } else {
+            println!("机械臂未处于 CAN 指令模式，发送复位指令退出...");
+            arm.reset_piper()?;
+            sleep(1000);
+            print_status(&arm);
+            // 复位后电机失电，等待状态稳定
+            sleep(500);
+        }
     }
 
     // 1. 使能电机：持续发送直到反馈确认全部使能（超时 10s）

@@ -544,6 +544,15 @@ impl PiperInterface {
         self.motion_ctrl_1(0x02, 0x00, 0x00)
     }
 
+    /// 退出拖动示教模式 (0x150 `grag_teach_ctrl`=0x02, 结束示教记录)。
+    ///
+    /// 相比 [`PiperInterface::reset_piper`] 不会清除错误/标志位；
+    /// 是否保持电机力矩取决于固件，建议先 [`PiperInterface::enable_arm`]
+    /// 使能电机（保持当前位姿）再调用本方法，避免悬停时失电坠落。
+    pub fn exit_teaching(&self) -> Result<()> {
+        self.motion_ctrl_1(0x00, 0x00, 0x02)
+    }
+
     /// 机械臂运动控制指令2 (0x151).
     #[allow(clippy::too_many_arguments)]
     pub fn motion_ctrl_2(
