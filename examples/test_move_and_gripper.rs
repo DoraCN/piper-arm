@@ -57,6 +57,48 @@ fn main() -> piper_arm::Result<()> {
     println!("当前机械臂状态:");
     print_status(&arm);
 
+    // 0a. 查询并打印本机机械臂真实关节限位（0.1° 单位）
+    println!("查询关节限位...");
+    arm.search_all_motor_max_angle_spd()?;
+    sleep(800);
+    let limits = arm.get_all_motor_angle_limit_max_spd();
+    for (i, l) in limits.iter().enumerate().skip(1) {
+        println!(
+            "  joint{}: max={:.1}° min={:.1}° (0x473 原始: {}..{})",
+            i,
+            l.max_angle_limit as f64 * 0.1,
+            l.min_angle_limit as f64 * 0.1,
+            l.max_angle_limit,
+            l.min_angle_limit,
+        );
+    }
+
+    // 0b. 把目标钳制到本机限位内（0x7FFF 表示该值无效，跳过）
+    let mut target = JOINT_TARGET;
+    let mut clamped = false;
+    for i in 0..6 {
+        let l = limits[i + 1];
+        if l.max_angle_limit != 0x7FFF && l.min_angle_limit != 0x7FFF {
+            let lo = l.min_angle_limit as i32 * 10; // 0.1° -> 0.001°
+            let hi = l.max_angle_limit as i32 * 10;
+            if target[i] < lo || target[i] > hi {
+                println!(
+                    "  [clamp] joint{} 目标 {:.3}° 超出限位 [{:.1}°, {:.1}°]，钳制为 {:.3}°",
+                    i + 1,
+                    target[i] as f64 / 1000.0,
+                    lo as f64 / 1000.0,
+                    hi as f64 / 1000.0,
+                    target[i].clamp(lo, hi) as f64 / 1000.0,
+                );
+                target[i] = target[i].clamp(lo, hi);
+                clamped = true;
+            }
+        }
+    }
+    if clamped {
+        println!("  钳制后目标: {:?}", target);
+    }
+
     // 0. 若机械臂处于示教模式 (TeachingMode) 等非 CAN 指令模式，先复位退出
     //    reset 会使机械臂立刻失电，请确保周围无遮挡/人。
     let in_can_mode = arm.get_arm_status().msg.ctrl_mode == CtrlMode::CanCtrl;
@@ -108,28 +150,31 @@ fn main() -> piper_arm::Result<()> {
     // 4. 移动到目标关节位姿，轮询反馈直到到位或超时
     println!(
         "移动至关节位姿: [{:.3}, {:.3}, {:.3}, {:.3}, {:.3}, {:.3}] deg",
-        JOINT_TARGET[0] as f64 / 1000.0,
-        JOINT_TARGET[1] as f64 / 1000.0,
-        JOINT_TARGET[2] as f64 / 1000.0,
-        JOINT_TARGET[3] as f64 / 1000.0,
-        JOINT_TARGET[4] as f64 / 1000.0,
-        JOINT_TARGET[5] as f64 / 1000.0,
+        target[0] as f64 / 1000.0,
+        target[1] as f64 / 1000.0,
+        target[2] as f64 / 1000.0,
+        target[3] as f64 / 1000.0,
+        target[4] as f64 / 1000.0,
+        target[5] as f64 / 1000.0,
     );
     let deadline = Instant::now() + MOVE_TIMEOUT;
+    let mut last_mode_ok = true;
     loop {
-        arm.joint_ctrl(
-            JOINT_TARGET[0],
-            JOINT_TARGET[1],
-            JOINT_TARGET[2],
-            JOINT_TARGET[3],
-            JOINT_TARGET[4],
-            JOINT_TARGET[5],
-        )?;
+        // 与官方 demo 一致：持续重发模式指令 + 关节指令
+        arm.mode_ctrl(0x01, 0x01, 30, 0x00)?;
+        arm.joint_ctrl(target[0], target[1], target[2], target[3], target[4], target[5])?;
+        let s = arm.get_arm_status();
+        if s.msg.ctrl_mode != CtrlMode::CanCtrl {
+            last_mode_ok = false;
+            println!("[WARN] 机械臂退出了 CAN 指令模式: ctrl_mode={:?}", s.msg.ctrl_mode);
+            print_status(&arm);
+            break;
+        }
         let j = arm.get_arm_joint_msgs().msg;
         let cur = [j.joint_1, j.joint_2, j.joint_3, j.joint_4, j.joint_5, j.joint_6];
         let reached = cur
             .iter()
-            .zip(JOINT_TARGET.iter())
+            .zip(target.iter())
             .all(|(c, t)| (c - t).abs() <= JOINT_TOL);
         if reached {
             println!("  已到达目标位姿");
@@ -149,6 +194,10 @@ fn main() -> piper_arm::Result<()> {
             break;
         }
         sleep(10);
+    }
+    if !last_mode_ok {
+        println!("[STOP] 机械臂已退出控制模式，中止后续夹爪测试");
+        return Ok(());
     }
 
     // 5. 夹爪张开/关闭 5 次
