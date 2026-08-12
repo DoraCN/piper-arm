@@ -6,6 +6,12 @@ use crate::error::{Error, Result};
 
 use super::CanBus;
 
+/// ENOBUFS (errno 105): 驱动/设备层瞬时发送失败，重试。
+const ENOBUFS: i32 = 105;
+/// 发送重试次数与退避间隔（毫秒）。
+const SEND_RETRIES: u32 = 5;
+const SEND_RETRY_BACKOFF_MS: u64 = 10;
+
 /// A SocketCAN bus (e.g. `can0`, `vcan0`).
 pub struct SocketCanBus {
     socket: CanSocket,
@@ -34,7 +40,21 @@ impl CanBus for SocketCanBus {
     fn send_frame(&self, id: u32, data: &[u8]) -> Result<()> {
         let frame = CanDataFrame::from_raw_id(id, data)
             .ok_or_else(|| Error::ValueError(format!("invalid CAN frame id 0x{id:X}")))?;
-        self.socket.write_frame(&frame).map_err(Error::Io)
+        // ENOBUFS (device TX 瞬时未就绪) 自动重试，避免偶发失败打断控制流。
+        let mut last_err = None;
+        for attempt in 0..SEND_RETRIES {
+            match self.socket.write_frame(&frame) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.raw_os_error() == Some(ENOBUFS) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        SEND_RETRY_BACKOFF_MS * (attempt as u64 + 1),
+                    ));
+                }
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
+        Err(Error::Io(last_err.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other))))
     }
 
     fn read_frame(&self) -> Result<(u32, Vec<u8>)> {
