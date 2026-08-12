@@ -60,6 +60,15 @@ piper-arm = "0.1"
 
 ## CAN interface setup
 
+> **Jetson (NVIDIA L4T) users**: if your OpenMoko GS USB-CAN adapters show up in
+> `lsusb` but no `canX` interface is created, the L4T kernel lacks the `gs_usb`
+> driver — see [docs/installation.md](docs/installation.md) for the full
+> build/install steps (dual-arm setup included).
+>
+> Jetson (NVIDIA L4T) 用户：若 `lsusb` 能看到 GS USB-CAN 转接器但系统没有生成
+> `canX` 接口，说明 L4T 内核缺少 `gs_usb` 驱动，完整编译安装步骤见
+> [docs/installation.md](docs/installation.md)（含双臂配置）。
+
 Activate the built-in CAN module at 1 Mbps before use:
 
 ```bash
