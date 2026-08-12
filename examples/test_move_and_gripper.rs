@@ -9,6 +9,7 @@
 
 use std::time::{Duration, Instant};
 
+use piper_arm::protocol::v2::messages::CtrlMode;
 use piper_arm::PiperInterface;
 
 /// 目标关节角（0.001 deg 单位）：[5.156, 102.197, -26.090, -1.272, -69.826, 117.305]°
@@ -56,6 +57,18 @@ fn main() -> piper_arm::Result<()> {
     println!("当前机械臂状态:");
     print_status(&arm);
 
+    // 0. 若机械臂处于示教模式 (TeachingMode) 等非 CAN 指令模式，先复位退出
+    //    reset 会使机械臂立刻失电，请确保周围无遮挡/人。
+    let in_can_mode = arm.get_arm_status().msg.ctrl_mode == CtrlMode::CanCtrl;
+    if !in_can_mode {
+        println!("机械臂未处于 CAN 指令模式，发送复位指令退出...");
+        arm.reset_piper()?;
+        sleep(1000);
+        print_status(&arm);
+        // 复位后电机失电，等待状态稳定
+        sleep(500);
+    }
+
     // 1. 使能电机：持续发送直到反馈确认全部使能（超时 10s）
     println!("使能机械臂电机...");
     let t0 = Instant::now();
@@ -76,11 +89,14 @@ fn main() -> piper_arm::Result<()> {
     }
     sleep(300);
 
-    // 2. 切换为 CAN 指令 + 关节控制模式，并校验 mode_feed
+    // 2. 切换为 CAN 指令 + 关节控制模式，并校验 ctrl_mode / mode_feed
     println!("设置关节控制模式 (0x151)...");
     arm.mode_ctrl(0x01, 0x01, 30, 0x00)?;
     sleep(500);
     print_status(&arm);
+    if arm.get_arm_status().msg.ctrl_mode != CtrlMode::CanCtrl {
+        println!("[WARN] ctrl_mode 仍未切换为 CAN 指令模式，指令可能不被执行");
+    }
 
     // 3. 使能夹爪（先 0x02 清错误，再 0x01 使能）
     println!("使能夹爪...");
