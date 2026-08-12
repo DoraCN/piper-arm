@@ -52,32 +52,48 @@ modprobe gs_usb 2>/dev/null || echo "  [WARN] gs_usb 加载失败，请确认已
 sleep 1
 
 echo "==> 1/6 写入 udev 规则: $UDEV_RULES"
+# 用 ATTR{type}=="280" (ARPHRD_CAN) + KERNELS(USB 端口) 匹配，比 DRIVERS 更可靠
 cat > "$UDEV_RULES" <<EOF
 # Piper 双臂 CAN 固定命名 (由 setup_can_dual_arm.sh 生成)
-SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="${LEFT_USB}",  NAME="${LEFT_IFACE}"
-SUBSYSTEM=="net", ACTION=="add", DRIVERS=="gs_usb", KERNELS=="${RIGHT_USB}", NAME="${RIGHT_IFACE}"
+SUBSYSTEM=="net", ACTION=="add", ATTR{type}=="280", KERNELS=="${LEFT_USB}",  NAME="${LEFT_IFACE}"
+SUBSYSTEM=="net", ACTION=="add", ATTR{type}=="280", KERNELS=="${RIGHT_USB}", NAME="${RIGHT_IFACE}"
 EOF
 
 echo "==> 2/6 重新加载 udev 规则"
 udevadm control --reload-rules
 udevadm trigger
 
-echo "==> 3/6 立即重命名当前接口 (按 USB 地址匹配)"
+echo "==> 3/6 写入开机拉起脚本: /usr/local/bin/piper-can-bringup.sh"
+# 该脚本按 USB 硬件地址重命名接口并拉起，开机/断电重插都可靠（不依赖 udev）
+cat > /usr/local/bin/piper-can-bringup.sh <<EOF
+#!/usr/bin/env bash
+# 按 USB 地址重命名并拉起 Piper 双臂 CAN 接口
+LEFT_USB="${LEFT_USB}"
+RIGHT_USB="${RIGHT_USB}"
+BITRATE="${BITRATE}"
+
 rename_iface() {
-    local target_usb="$1" new_name="$2" cur_usb cur_iface
-    for cur_iface in $(ip -br link show type can | awk '{print $1}'); do
-        cur_usb=$(ip -details link show "$cur_iface" 2>/dev/null \
+    local target_usb="\$1" new_name="\$2" cur_usb cur_iface
+    for cur_iface in \$(ip -br link show type can | awk '{print \$1}'); do
+        cur_usb=\$(ip -details link show "\$cur_iface" 2>/dev/null \
                   | grep -oP 'parentdev \K[^:]+' || true)
-        if [ -n "$cur_usb" ] && [ "$cur_usb" = "$target_usb" ] \
-           && [ "$cur_iface" != "$new_name" ]; then
-            echo "    $cur_iface (USB $cur_usb) -> $new_name"
-            ip link set "$cur_iface" down || true
-            ip link set "$cur_iface" name "$new_name" || true
+        if [ -n "\$cur_usb" ] && [ "\$cur_usb" = "\$target_usb" ] \
+           && [ "\$cur_iface" != "\$new_name" ]; then
+            echo "\$cur_iface (USB \$cur_usb) -> \$new_name"
+            ip link set "\$cur_iface" down || true
+            ip link set "\$cur_iface" name "\$new_name" || true
         fi
     done
 }
-rename_iface "$LEFT_USB"  "$LEFT_IFACE"
-rename_iface "$RIGHT_USB" "$RIGHT_IFACE"
+
+rename_iface "\$LEFT_USB"  "${LEFT_IFACE}"
+rename_iface "\$RIGHT_USB" "${RIGHT_IFACE}"
+
+ip link set "${LEFT_IFACE}"  up type can bitrate "\$BITRATE"
+ip link set "${RIGHT_IFACE}" up type can bitrate "\$BITRATE"
+echo "can bringup done"
+EOF
+chmod +x /usr/local/bin/piper-can-bringup.sh
 
 echo "==> 4/6 写入 systemd 服务: $SYSTEMD_SERVICE"
 cat > "$SYSTEMD_SERVICE" <<EOF
@@ -90,8 +106,7 @@ After=network.target systemd-udev-settle.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/bin/udevadm settle --timeout=15
-ExecStart=/sbin/ip link set ${LEFT_IFACE}  up type can bitrate ${BITRATE}
-ExecStart=/sbin/ip link set ${RIGHT_IFACE} up type can bitrate ${BITRATE}
+ExecStart=/usr/local/bin/piper-can-bringup.sh
 
 [Install]
 WantedBy=multi-user.target
